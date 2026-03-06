@@ -1,0 +1,13 @@
+
+# Data files - share via Google Drive instead
+*.npy
+*.csv
+sample_data/
+
+# Python
+__pycache__/
+*.pyc
+.env
+
+# Colab checkpoints
+.ipynb_checkpoints/
