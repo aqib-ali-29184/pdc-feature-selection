@@ -1,118 +1,88 @@
-# Milestone 3 — Member 1: Coordination & Elite Protection
+# Parallel Feature Selection Engine
 
-## What this adds
+A parallel, population-based feature selection system built across three milestones for the Parallel and Distributed Computing course. The system evolves binary feature masks using two operators running concurrently, evaluated with a Naive Bayes classifier on three datasets: MNIST, Madelon, and CIFAR-10 (grayscale).
 
-This builds directly on top of the Milestone 2 notebook (`milestone2_parallel_framework.ipynb`).
-All Milestone 1 and 2 cells are untouched. Four new cells are appended at the bottom.
+**Team:** Aqib Ali, Ayesha Salahuddin, Syed Hasan Imam
 
 ---
 
-## New Classes
+## Milestone 1 — Core Building Blocks
 
-### `EliteVault`
+Established the foundational classes used throughout all milestones.
 
-Keeps a ranked archive of the **top-k masks seen across all generations**, not just the current population.
+- `DatasetLoader` — loads, subsamples, normalizes, and splits MNIST (784 features), Madelon (500 features), and CIFAR-10 grayscale (1024 features)
+- `NaiveBayesEvaluator` — thread-safe classifier; creates a fresh `GaussianNB` instance per call
+- `BinaryMaskEncoder` — generates and encodes feature masks (all-ones, random density)
+- `FitnessFunction` — scores a mask as `accuracy - alpha * (n_selected / n_total)`, penalizing feature count
+- `ResultsLogger` — logs every evaluated mask with score, accuracy, feature count, and timing; exports to CSV
 
-**The problem it solves:** After a merge, the operators start mutating the population again. Without protection, a good mask found in gen 3 can be overwritten and lost by gen 5. `EliteVault` prevents this.
+**Baseline (all features, no selection):**
 
-**How it works:**
-- After every generation, `update(scored_population)` compares the current population against the vault and retains only the best unique masks (default: top 5).
-- At the end of each generation, `inject(population)` physically overwrites the **last `k` slots** of the population with the vault's top masks. Since `merge_populations()` already sorts the population best-first, the last slots are always the weakest — so elites replace the weakest, not the best.
-- `vault.summary()` prints the final leaderboard at the end of the run.
+| Dataset     | Features | Accuracy |
+|-------------|----------|----------|
+| MNIST       | 784      | 58.70%   |
+| Madelon     | 500      | 84.00%   |
+| CIFAR-10    | 1024     | 22.70%   |
 
-```python
-vault = EliteVault(vault_size=5)
-vault.update(scored_population)   # call after every merge
-population = vault.inject(population)  # call after update
-best_score, best_mask = vault.best()
+---
+
+## Milestone 2 — Parallel Operators and Population Search
+
+Introduced the two operators that evolve the population, and a coordinator that runs them in parallel each generation.
+
+- `FeatureBiasComputer` — computes information gain scores; guides the addition operator to prefer high-IG features
+- `AdditionOperator` — proposes adding features to each mask, accepts if fitness improves
+- `SparsityBiasComputer` — inverts IG scores; guides the removal operator to drop low-IG features first
+- `RemovalOperator` — proposes removing features from each mask, accepts if fitness improves
+- `merge_populations` — deduplicates and re-ranks the two operators' outputs by fitness score
+- `ParallelCoordinator` — runs AdditionOp and RemovalOp in parallel threads via `ThreadPoolExecutor`; merges their outputs each generation
+
+Each generation: both operators receive a deep copy of the population, run concurrently, and their outputs are merged into one ranked population of fixed size.
+
+**Results after 5 generations (population = 20):**
+
+| Dataset     | Best Score | Features Selected |
+|-------------|------------|-------------------|
+| MNIST       | 0.772589   | 189 / 784         |
+| Madelon     | 0.858478   | 153 / 500         |
+| CIFAR-10    | 0.232334   | 273 / 1024        |
+
+---
+
+## Milestone 3 — Elite Protection, Exchange Protocol, and Coordinated Search
+
+Extended the framework with two mechanisms to prevent regression and improve convergence, then ran a full comparative analysis.
+
+- `EliteVault` — stores the top-k masks seen across all generations; reinjects them into the population after each merge to prevent loss of best solutions
+- `ExchangeProtocol` — every `exchange_interval` generations, the top-n masks from each operator's snapshot are injected into the other's population, cross-pollinating the two search directions
+- `run_coordinated_search` — full loop combining ParallelCoordinator + EliteVault + ExchangeProtocol over n generations
+
+**Final results (8 generations, vault size = 5, exchange every 2 gens):**
+
+| Dataset     | Baseline Accuracy | Final Accuracy | Accuracy Change | Features Used   | Feature Reduction |
+|-------------|-------------------|----------------|-----------------|-----------------|-------------------|
+| MNIST       | 58.70%            | 79.30%         | +20.60%         | 198 / 784       | 74.7% fewer       |
+| Madelon     | 84.00%            | 87.31%         | +3.31%          | 159 / 500       | 68.2% fewer       |
+| CIFAR-10    | 22.70%            | 23.60%         | +0.90%          | 288 / 1024      | 71.9% fewer       |
+
+The Removal operator was dominant across all three datasets (higher average masks improved per generation). All datasets reached 95% of their final score by generation 0, with steady incremental gains through generation 7.
+
+---
+
+## Repository Structure
+
+```
+main/
+    Milestone_3.ipynb                  # Complete notebook: all three milestones end-to-end
+    README.md
 ```
 
----
-
-### `ExchangeProtocol`
-
-Every `exchange_interval` generations, the **top-n masks from each operator's population are migrated into the other operator's population**, replacing its weakest slots.
-
-**The problem it solves:** Both operators start each generation from the same merged population. Without exchange, they can converge to the same local optimum independently. Migration forces cross-pollination — the Addition side gets the most compact masks from Removal, and vice versa.
-
-**Exchange rule:**
-- Fires at generations: `exchange_interval, 2×exchange_interval, 3×exchange_interval, ...` (gen 0 is skipped).
-- Default: every 2 generations, 3 masks migrate per side.
-- Migration is **bilateral** — both operators give and receive simultaneously.
-
-```python
-exchange = ExchangeProtocol(fitness_fn, exchange_interval=2, n_exchange=3)
-
-if exchange.should_exchange(gen):
-    pop_add, pop_rem = exchange.exchange(
-        pop_add, pop_rem, X_train, X_test, y_train, y_test, generation=gen
-    )
-```
+Each milestone branch (`milestone-1`, `milestone-2`, `milestone-3`) preserves the incremental development history.
 
 ---
 
-## Entry Point: `run_coordinated_search()`
+## How to Run
 
-Replaces the bare `coordinator.run()` from Milestone 2. The loop per generation is:
+Open `Milestone_3.ipynb` in Google Colab. All cells run top-to-bottom. Datasets are downloaded automatically on first run.
 
-```
-1. Exchange (if due)  →  ExchangeProtocol cross-pollinates the two operator snapshots
-2. Parallel generation  →  ParallelCoordinator runs AdditionOp + RemovalOp in threads
-3. Vault update  →  EliteVault absorbs any new best masks
-4. Elite injection  →  Vault's top masks are written back into the population
-```
-
-```python
-final_pop, all_stats, vault = run_coordinated_search(
-    coordinator        = coordinator,
-    initial_population = init_pop,
-    X_train=X_train, X_test=X_test,
-    y_train=y_train, y_test=y_test,
-    fitness_fn         = fitness_fn,
-    n_generations      = 8,
-    vault_size         = 5,
-    exchange_interval  = 2,
-    n_exchange         = 3,
-    logger             = logger,
-)
-```
-
-**Returns:**
-- `final_pop` — the last population (list of masks)
-- `all_stats` — list of per-generation stat dicts (same format as Milestone 2)
-- `vault` — the `EliteVault` instance; call `vault.best()` or `vault.top_masks()` to retrieve the best results
-
----
-
-## Confirmed Output (8 generations, all 3 datasets)
-
-| Dataset     | Final Vault Best Score | Best Features |
-|-------------|------------------------|---------------|
-| MNIST       | 0.790474               | 198           |
-| MADELON     | 0.869897               | 159           |
-| CIFAR10     | 0.233187               | 288           |
-
-Scores improve monotonically across all datasets. `dupes removed` increasing over generations confirms the population is converging rather than drifting randomly.
-
----
-
-## Parameters to tune
-
-| Parameter          | Default | Effect |
-|--------------------|---------|--------|
-| `vault_size`       | 5       | How many elite masks to protect. Increase if you want a wider elite pool for Milestone 3 comparative analysis. |
-| `exchange_interval`| 2       | How often operators exchange. Lower = more aggressive cross-pollination. |
-| `n_exchange`       | 3       | Masks migrated per side per exchange. Keep ≤ 15% of population size. |
-| `n_generations`    | 8       | Increase to 15–20 for the final benchmarking run in Milestone 3. |
-
----
-
-## What Hasan (Member 3) needs to know
-
-`run_coordinated_search()` is a drop-in wrapper around `ParallelCoordinator`. It does not change how threads are spawned or how operators are called — it only wraps the loop with vault and exchange logic. No changes to `ParallelCoordinator`, `AdditionOperator`, or `RemovalOperator` were made.
-
-The `all_stats` list returned has the same structure as before, so any export or analysis code from Milestone 2 will work on it without modification.
-
-## What Ayesha (Member 2) needs to know
-
-`EliteVault` and `ExchangeProtocol` are self-contained and have no dependencies on the operator internals. The vault stores raw `np.ndarray` masks and scores — nothing Removal-specific. The exchange simply calls `fitness_fn.evaluate()` on existing masks, the same call the operators themselves make.
+**Dependencies:** `numpy`, `pandas`, `scikit-learn`, `matplotlib`, `tensorflow` (for Keras dataset loaders), `opencv-python`
